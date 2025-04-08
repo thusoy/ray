@@ -4,6 +4,7 @@ import time
 import uuid
 from typing import Dict, Iterator, List, Optional
 
+import ray
 from ray.data._internal.execution.autoscaler import create_autoscaler
 from ray.data._internal.execution.backpressure_policy import (
     BackpressurePolicy,
@@ -27,6 +28,7 @@ from ray.data._internal.execution.streaming_executor_state import (
     select_operator_to_run,
     update_operator_states,
 )
+from ray.data._internal.logging import SessionFileHandler
 from ray.data._internal.logging import get_log_directory
 from ray.data._internal.progress_bar import ProgressBar
 from ray.data._internal.stats import DatasetStats, StatsManager, DatasetState
@@ -82,6 +84,14 @@ class StreamingExecutor(Executor, threading.Thread):
         self._num_errored_blocks = 0
 
         self._last_debug_log_time = 0
+        self._ray_job_id = ray.get_runtime_context().get_job_id()
+        self._dataset_log_handler = SessionFileHandler(
+            filename=f"ray_data-{self._dataset_tag}-{self._ray_job_id}.log",
+        )
+        ray_data_handlers = logging.getLogger("ray.data").handlers
+        if ray_data_handlers:
+            self._dataset_log_handler.setFormatter(ray_data_handlers[0].formatter)
+        logger.addHandler(self._dataset_log_handler)
 
         Executor.__init__(self, self._data_context.execution_options)
         thread_name = f"StreamingExecutor-{self._execution_id}"
@@ -101,7 +111,7 @@ class StreamingExecutor(Executor, threading.Thread):
 
         if not isinstance(dag, InputDataBuffer):
             if self._data_context.print_on_execution_start:
-                message = "Starting execution of Dataset."
+                message = f"Starting execution of Dataset {self._dataset_tag} on ray job {self._ray_job_id}."
                 log_path = get_log_directory()
                 if log_path is not None:
                     message += f" Full logs are in {log_path}"
@@ -229,6 +239,7 @@ class StreamingExecutor(Executor, threading.Thread):
                 for callback in get_execution_callbacks(self._data_context):
                     callback.after_execution_fails(self, exception)
             self._autoscaler.on_executor_shutdown()
+            logger.removeHandler(self._dataset_log_handler)
 
     def run(self):
         """Run the control loop in a helper thread.
